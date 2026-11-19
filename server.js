@@ -6,7 +6,16 @@ const http = require("http");
 const TOKEN = process.env.GHL_TOKEN;
 const LOC = process.env.LOCATION_ID;
 const ADMIN = process.env.ADMIN_KEY;
+const CLIENT = process.env.CLIENT_KEY || "";
 const PORT = process.env.PORT || 3000;
+const fs = require("fs");
+const path = require("path");
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+const F_GROUPS = path.join(DATA_DIR, "groups.json"), F_DEC = path.join(DATA_DIR, "decisions.json");
+let decisions = {};
+try { decisions = JSON.parse(fs.readFileSync(F_DEC, "utf8")); } catch {}
+const saveDecisions = () => { try { fs.writeFileSync(F_DEC + ".tmp", JSON.stringify(decisions)); fs.renameSync(F_DEC + ".tmp", F_DEC); } catch (e) { console.error("save decisions", e.message); } };
 const API = "https://services.leadconnectorhq.com";
 const H = { Authorization: `Bearer ${TOKEN}`, Version: "2021-07-28", "Content-Type": "application/json", Accept: "application/json" };
 
@@ -15,6 +24,7 @@ if (!TOKEN || !LOC || !ADMIN) { console.error("Set GHL_TOKEN, LOCATION_ID and AD
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const state = { status: "idle", fetched: 0, started: null, finished: null, error: null, groups: [], stats: {}, deleted: [] };
 let contacts = []; // kept in memory only
+try { const sv = JSON.parse(fs.readFileSync(F_GROUPS, "utf8")); state.groups = sv.groups; state.status = "done"; state.finished = sv.at; state.stats = { loadedFromDisk: true, groups: sv.groups.length }; } catch {}
 
 async function api(path, opts = {}, tries = 5) {
   for (let i = 0; i < tries; i++) {
@@ -119,12 +129,13 @@ function analyse() {
     else { conf = "possible"; why = `Only the business name matches ("${t.get("biz")}"), with no shared email or phone.`; }
     if (list.length > 4) why += ` ${list.length} records linked, so check carefully.`;
     const master = pickMaster(list);
-    groups.push({ id: "G" + String(++n).padStart(5, "0"), type: [...t.keys()].join("+"), key, conf, sug: conf === "likely" ? "merge" : "keep", master, why, c: list.map(view) });
+    groups.push({ id: "G" + String(++n).padStart(5, "0"), sig: list.map((c) => c.id).sort().join("|"), type: [...t.keys()].join("+"), key, conf, sug: conf === "likely" ? "merge" : "keep", master, why, c: list.map(view) });
   }
   const rank = { likely: 0, possible: 1, diff: 2 };
   groups.sort((a, b) => rank[a.conf] - rank[b.conf] || b.c.length - a.c.length);
   groups.forEach((g, i) => (g.id = "G" + String(i + 1).padStart(5, "0")));
   state.groups = groups;
+  try { fs.writeFileSync(F_GROUPS, JSON.stringify({ groups, at: new Date().toISOString() })); } catch (e) { console.error("save groups", e.message); }
   state.stats = { contacts: contacts.length, groups: groups.length, likely: groups.filter((g) => g.conf === "likely").length, possible: groups.filter((g) => g.conf === "possible").length, byType: groups.reduce((o, g) => ((o[g.type] = (o[g.type] || 0) + 1), o), {}) };
 }
 
@@ -138,7 +149,7 @@ async function runScan() {
 
 // ---------- deletes (only on explicit request; merges are done by hand in GHL) ----------
 async function applyDeletes(ids, dry) {
-  const valid = new Set(contacts.map((c) => c.id));
+  const valid = new Set(state.groups.flatMap((g) => g.c.map((c) => c.i)));
   const todo = ids.filter((id) => valid.has(id));
   if (dry) return { dryRun: true, wouldDelete: todo.length, ids: todo };
   const out = { deleted: 0, failed: [] };
@@ -154,27 +165,59 @@ async function applyDeletes(ids, dry) {
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "x-admin-key, content-type", "Access-Control-Allow-Methods": "GET,POST,OPTIONS" };
 const send = (res, code, obj) => { res.writeHead(code, { "Content-Type": "application/json", ...CORS }); res.end(JSON.stringify(obj)); };
 const readBody = (req) => new Promise((r) => { let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => { try { r(JSON.parse(b || "{}")); } catch { r({}); } }); });
+const roleOf = (req, url) => { const k = req.headers["x-admin-key"] || url.searchParams.get("k"); if (k && k === ADMIN) return "admin"; if (k && CLIENT && k === CLIENT) return "client"; return null; };
+const tierOf = (g) => (g.conf === "likely" ? "likely" : g.type === "biz" ? "biz" : "contact");
+const decKey = (g) => g.sig || g.id;
+const gdec = (g) => decisions[decKey(g)] || null;
 
 http.createServer(async (req, res) => {
   if (req.method === "OPTIONS") { res.writeHead(204, CORS); return res.end(); }
   const url = new URL(req.url, "http://x");
-  if (url.pathname === "/") return send(res, 200, { ok: true, tool: "fyb-dedupe", status: state.status });
-  if ((req.headers["x-admin-key"] || url.searchParams.get("k")) !== ADMIN) return send(res, 401, { error: "bad key" });
+  if (url.pathname === "/") return send(res, 200, { ok: true, tool: "fyb-dedupe" });
+  if (url.pathname === "/review") { res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" }); return res.end(fs.readFileSync(path.join(__dirname, "review.html"))); }
+  const role = roleOf(req, url);
+  if (!role) return send(res, 401, { error: "bad key" });
+  const isAdmin = role === "admin";
 
-  if (url.pathname === "/scan" && req.method === "POST") { runScan(); return send(res, 202, { started: true }); }
   if (url.pathname === "/status") return send(res, 200, { status: state.status, fetched: state.fetched, started: state.started, finished: state.finished, error: state.error, stats: state.stats, deletedSoFar: state.deleted.length });
+  if (url.pathname === "/scan" && req.method === "POST") { if (!isAdmin) return send(res, 403, { error: "admin only" }); runScan(); return send(res, 202, { started: true }); }
+
   if (url.pathname === "/groups") {
-    const conf = url.searchParams.get("conf"), off = +url.searchParams.get("offset") || 0, lim = Math.min(+url.searchParams.get("limit") || 200, 1000);
-    const g = conf ? state.groups.filter((x) => x.conf === conf) : state.groups;
-    return send(res, 200, { total: g.length, offset: off, groups: g.slice(off, off + lim) });
+    const tier = url.searchParams.get("tier"), q = (url.searchParams.get("q") || "").toLowerCase().trim(), dec = url.searchParams.get("decided");
+    const off = +url.searchParams.get("offset") || 0, lim = Math.min(+url.searchParams.get("limit") || 25, 200);
+    const counts = { likely: { total: 0, decided: 0 }, contact: { total: 0, decided: 0 }, biz: { total: 0, decided: 0 } };
+    for (const g of state.groups) { const t = tierOf(g); counts[t].total++; if (gdec(g)) counts[t].decided++; }
+    let list = state.groups;
+    if (tier) list = list.filter((g) => tierOf(g) === tier);
+    if (dec === "yes") list = list.filter((g) => gdec(g)); else if (dec === "no") list = list.filter((g) => !gdec(g));
+    else if (["merge", "keep", "delete"].includes(dec)) list = list.filter((g) => (gdec(g) || {}).action === dec);
+    if (q) list = list.filter((g) => g.c.some((c) => [c.n, c.b, c.e, c.p].join(" ").toLowerCase().includes(q)));
+    const page = list.slice(off, off + lim).map((g) => ({ ...g, decision: gdec(g) }));
+    return send(res, 200, { total: list.length, offset: off, counts, groups: page, scanAt: state.finished });
+  }
+  if (url.pathname === "/decision" && req.method === "POST") {
+    const b = await readBody(req); const g = state.groups.find((x) => x.id === b.id);
+    if (!g) return send(res, 404, { error: "no such group" });
+    if (b.action === null) delete decisions[decKey(g)];
+    else if (["merge", "keep", "delete"].includes(b.action)) decisions[decKey(g)] = { action: b.action, master: Number.isInteger(b.master) ? b.master : g.master, note: String(b.note || "").slice(0, 500), at: new Date().toISOString() };
+    else return send(res, 400, { error: "bad action" });
+    saveDecisions(); return send(res, 200, { ok: true, decision: gdec(g) });
+  }
+  if (url.pathname === "/decisions.csv") {
+    const esc = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+    const rows = [["group", "tier", "decision", "keep_record_name", "keep_record_email", "keep_record_phone", "other_records", "note", "decided_at"]];
+    for (const g of state.groups) { const d = gdec(g); if (!d) continue; const m = g.c[d.master] || g.c[0]; rows.push([g.id, tierOf(g), d.action, m.n, m.e, m.p, g.c.filter((_, i) => i !== d.master).map((c) => `${c.n} <${c.e || c.p}> ${c.i}`).join(" ; "), d.note, d.at]); }
+    res.writeHead(200, { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=fyb-duplicate-decisions.csv", ...CORS });
+    return res.end(rows.map((r) => r.map(esc).join(",")).join("\n"));
   }
   if (url.pathname === "/apply" && req.method === "POST") {
-    // body: { decisions: { G00001: {action:"merge"|"keep"|"delete", master:0} }, confirm: false }
+    if (!isAdmin) return send(res, 403, { error: "admin only" });
+    // Uses saved client decisions. body: { confirm: false }
     const b = await readBody(req); const ids = []; const manualMerges = [];
-    for (const [gid, d] of Object.entries(b.decisions || {})) {
-      const g = state.groups.find((x) => x.id === gid); if (!g) continue;
-      if (d.action === "delete") g.c.forEach((c, i) => { if (i !== (d.master ?? g.master)) ids.push(c.i); });
-      if (d.action === "merge") manualMerges.push({ group: gid, keep: g.c[d.master ?? g.master], mergeIn: g.c.filter((_, i) => i !== (d.master ?? g.master)) });
+    for (const g of state.groups) {
+      const d = gdec(g); if (!d) continue; const m = Number.isInteger(d.master) ? d.master : g.master;
+      if (d.action === "delete") g.c.forEach((c, i) => { if (i !== m) ids.push(c.i); });
+      if (d.action === "merge") manualMerges.push({ group: g.id, keep: g.c[m], mergeIn: g.c.filter((_, i) => i !== m) });
     }
     const r = await applyDeletes(ids, b.confirm !== true);
     return send(res, 200, { deletes: r, mergesToDoInGHL: manualMerges.length, manualMerges });
