@@ -46,21 +46,22 @@ async function fetchAll() {
 }
 
 // ---------- normalisation ----------
-const normEmail = (e) => (e || "").trim().toLowerCase();
-const normPhone = (p) => { const d = (p || "").replace(/\D/g, ""); return d.length >= 10 ? d.slice(-10) : ""; };
+const str = (v) => (v == null ? "" : typeof v === "string" ? v : typeof v === "object" ? str(v.email || v.phone || v.value || v.name || "") : String(v));
+const normEmail = (e) => str(e).trim().toLowerCase();
+const normPhone = (p) => { const d = str(p).replace(/\D/g, ""); return d.length >= 10 ? d.slice(-10) : ""; };
 const SUFFIX = /\b(llc|l l c|inc|incorporated|corp|corporation|co|company|ltd|limited|lp|llp|pllc|the)\b/g;
-const normBiz = (b) => (b || "").toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9 ]/g, " ").replace(SUFFIX, " ").replace(/\s+/g, " ").trim();
-const normName = (n) => (n || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+const normBiz = (b) => str(b).toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9 ]/g, " ").replace(SUFFIX, " ").replace(/\s+/g, " ").trim();
+const normName = (n) => str(n).toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
 const GENERIC_EMAIL = /^(info|admin|office|support|sales|contact|hello|underwriting|uw|submissions|subs|deals|funding|noreply|no-reply)@/;
-const nameOf = (c) => c.contactName || [c.firstName, c.lastName].filter(Boolean).join(" ") || "";
+const nameOf = (c) => str(c.contactName) || [str(c.firstName), str(c.lastName)].filter(Boolean).join(" ") || "";
 
 function view(c) {
-  return { i: c.id, n: nameOf(c), b: c.companyName || "", p: c.phone || "", e: c.email || "", d: (c.dateAdded || "").slice(0, 10), t: (c.tags || []).slice(0, 6), o: c.assignedTo ? "owned" : "" };
+  return { i: c.id, n: nameOf(c), b: str(c.companyName), p: str(c.phone), e: str(c.email), d: str(c.dateAdded).slice(0, 10), t: (Array.isArray(c.tags) ? c.tags : []).slice(0, 6).map(str), o: c.assignedTo ? "owned" : "" };
 }
 const score = (c) => (c.email ? 2 : 0) + (c.phone ? 2 : 0) + (c.companyName ? 1 : 0) + ((c.tags || []).length ? 1 : 0) + (c.assignedTo ? 1 : 0) + (c.dateUpdated ? 1 : 0);
 function pickMaster(list) {
   let best = 0;
-  list.forEach((c, i) => { const b = list[best]; if (score(c) > score(b) || (score(c) === score(b) && (c.dateUpdated || "") > (b.dateUpdated || ""))) best = i; });
+  list.forEach((c, i) => { const b = list[best]; if (score(c) > score(b) || (score(c) === score(b) && str(c.dateUpdated) > str(b.dateUpdated))) best = i; });
   return best;
 }
 
@@ -76,9 +77,9 @@ function analyse() {
 
   contacts.forEach((c, i) => {
     add(idx.email, normEmail(c.email), i);
-    for (const ae of c.additionalEmails || []) add(idx.email, normEmail(ae), i);
+    for (const ae of Array.isArray(c.additionalEmails) ? c.additionalEmails : []) add(idx.email, normEmail(ae), i);
     add(idx.phone, normPhone(c.phone), i);
-    for (const ap of c.additionalPhones || []) add(idx.phone, normPhone(ap), i);
+    for (const ap of Array.isArray(c.additionalPhones) ? c.additionalPhones : []) add(idx.phone, normPhone(ap), i);
     const nb = normBiz(c.companyName);
     if (nb.length >= 4) add(idx.biz, nb, i);
   });
