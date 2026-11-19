@@ -89,7 +89,7 @@ input[type=search]{flex:1;min-width:180px;padding:6px 10px;border:1px solid var(
  <div class="tabs" id="tabs"></div>
  <div class="tools">
   <input type="search" id="q" placeholder="Search name, company, email or phone">
-  <select id="dec" class="chip"><option value="no" selected>To review</option><option value="">Show everything</option><option value="merge">Merge</option><option value="keep">Keep both</option><option value="delete">Delete other</option></select>
+  <select id="dec" class="chip"><option value="no" selected>To review</option><option value="">Show everything</option><option value="merge">Merge</option><option value="keep">Keep both</option><option value="delete">Delete other</option><option value="done">Completed in GHL</option></select>
   <a class="btn" id="csv" href="#">Download my choices (CSV)</a>
  </div>
 </div>
@@ -109,7 +109,7 @@ function renderTop(){
  const t=TIERS.reduce((a,x)=>({total:a.total+(counts[x[0]]||{}).total,decided:a.decided+(counts[x[0]]||{}).decided}),{total:0,decided:0});
  $("prog").replaceChildren(el("span",{style:"width:"+(t.total?t.decided/t.total*100:0)+"%;background:var(--keep)"}));
  $("stats").replaceChildren(el("span",{},el("b",{},t.decided.toLocaleString())," of ",t.total.toLocaleString()," groups reviewed"));
- $("tabs").replaceChildren(...TIERS.map(([k,l])=>{const c=counts[k]||{total:0,decided:0};return el("button",{class:"tab","aria-pressed":String(tier===k),onclick:()=>{tier=k;off=0;load()}},l,el("small",{},c.decided+"/"+c.total))}));
+ $("tabs").replaceChildren(...TIERS.map(([k,l])=>{const c=counts[k]||{total:0,decided:0};return el("button",{class:"tab","aria-pressed":String(tier===k),onclick:()=>{tier=k;off=0;load()}},l,el("small",{},(c.decided)+"/"+c.total))}));
  $("csv").href="/decisions.csv?k="+encodeURIComponent(K);
 }
 async function save(g,patch,node){
@@ -123,6 +123,8 @@ async function save(g,patch,node){
 }
 function paint(node,g){
  const d=g.decision, m=d?d.master:g.master;
+ const locked=!!(d&&d.done);
+ node.querySelectorAll("button,input.note").forEach(b=>{b.disabled=locked});
  node.classList.toggle("done",!!d);
  node.querySelectorAll(".rec").forEach((b,i)=>{b.classList.toggle("main",i===m);b.querySelector(".lbl span").textContent=i===m?"MAIN RECORD":"Click to make main";b.classList.toggle("dim",!!d&&d.action==="keep")});
  node.querySelectorAll(".seg button").forEach(b=>b.setAttribute("aria-pressed",String(!!d&&d.action===b.dataset.a)));
@@ -132,6 +134,7 @@ function card(g){
  const label={merge:multi?"Merge all":"Merge",keep:multi?"Keep all":"Keep both",delete:multi?"Delete others":"Delete other"};
  const node=el("div",{class:"group"});
  node.append(el("div",{class:"ghead"},el("span",{class:"gid"},g.id),el("span",{class:"badge b-"+g.conf},g.conf==="likely"?"Likely duplicate":"Possible"),el("span",{class:"key"},g.key||""),el("span",{class:"saved"},"")));
+ if(g.decision&&g.decision.done)node.append(el("div",{class:"banner",style:"background:var(--keep-bg);color:var(--keep)"},"Completed in GHL on "+g.decision.done.slice(0,10)+" ("+g.decision.action+")."));
  node.append(el("div",{class:"why"},g.why));
  node.append(el("div",{class:"sug"},"Suggested: ",el("span",{class:"pill "+(g.sug==="merge"?"p-merge":"p-keep")},g.sug==="merge"?"Merge":"Keep both")));
  const cards=el("div",{class:"cards"});

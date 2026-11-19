@@ -185,11 +185,12 @@ http.createServer(async (req, res) => {
   if (url.pathname === "/groups") {
     const tier = url.searchParams.get("tier"), q = (url.searchParams.get("q") || "").toLowerCase().trim(), dec = url.searchParams.get("decided");
     const off = +url.searchParams.get("offset") || 0, lim = Math.min(+url.searchParams.get("limit") || 25, 200);
-    const counts = { likely: { total: 0, decided: 0 }, contact: { total: 0, decided: 0 }, biz: { total: 0, decided: 0 } };
-    for (const g of state.groups) { const t = tierOf(g); counts[t].total++; if (gdec(g)) counts[t].decided++; }
+    const counts = { likely: { total: 0, decided: 0, done: 0 }, contact: { total: 0, decided: 0, done: 0 }, biz: { total: 0, decided: 0, done: 0 } };
+    for (const g of state.groups) { const t = tierOf(g); counts[t].total++; const d0 = gdec(g); if (d0) counts[t].decided++; if (d0 && d0.done) counts[t].done++; }
     let list = state.groups;
     if (tier) list = list.filter((g) => tierOf(g) === tier);
-    if (dec === "yes") list = list.filter((g) => gdec(g)); else if (dec === "no") list = list.filter((g) => !gdec(g));
+    if (dec === "done") list = list.filter((g) => (gdec(g) || {}).done);
+    else if (dec === "yes") list = list.filter((g) => gdec(g)); else if (dec === "no") list = list.filter((g) => !gdec(g));
     else if (["merge", "keep", "delete"].includes(dec)) list = list.filter((g) => (gdec(g) || {}).action === dec);
     if (q) list = list.filter((g) => g.c.some((c) => [c.n, c.b, c.e, c.p].join(" ").toLowerCase().includes(q)));
     const page = list.slice(off, off + lim).map((g) => ({ ...g, decision: gdec(g) }));
@@ -198,6 +199,7 @@ http.createServer(async (req, res) => {
   if (url.pathname === "/decision" && req.method === "POST") {
     const b = await readBody(req); const g = state.groups.find((x) => x.id === b.id);
     if (!g) return send(res, 404, { error: "no such group" });
+    if ((gdec(g) || {}).done) return send(res, 409, { error: "already completed in GHL" });
     if (b.action === null) delete decisions[decKey(g)];
     else if (["merge", "keep", "delete"].includes(b.action)) decisions[decKey(g)] = { action: b.action, master: Number.isInteger(b.master) ? b.master : g.master, note: String(b.note || "").slice(0, 500), at: new Date().toISOString() };
     else return send(res, 400, { error: "bad action" });
@@ -210,12 +212,24 @@ http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "text/csv", "Content-Disposition": "attachment; filename=fyb-duplicate-decisions.csv", ...CORS });
     return res.end(rows.map((r) => r.map(esc).join(",")).join("\n"));
   }
+  if (url.pathname === "/mark-done" && req.method === "POST") {
+    // admin only. body: { action: "merge"|"delete"|"keep"|"all", ids?: ["G00001"...] , undo?: false }
+    if (!isAdmin) return send(res, 403, { error: "admin only" });
+    const b = await readBody(req); const only = Array.isArray(b.ids) ? new Set(b.ids) : null; let n = 0;
+    for (const g of state.groups) {
+      const d = gdec(g); if (!d) continue;
+      if (only && !only.has(g.id)) continue;
+      if (b.action && b.action !== "all" && d.action !== b.action) continue;
+      if (b.undo) { if (d.done) { delete d.done; n++; } } else if (!d.done) { d.done = new Date().toISOString(); n++; }
+    }
+    saveDecisions(); return send(res, 200, { changed: n });
+  }
   if (url.pathname === "/apply" && req.method === "POST") {
     if (!isAdmin) return send(res, 403, { error: "admin only" });
     // Uses saved client decisions. body: { confirm: false }
     const b = await readBody(req); const ids = []; const manualMerges = [];
     for (const g of state.groups) {
-      const d = gdec(g); if (!d) continue; const m = Number.isInteger(d.master) ? d.master : g.master;
+      const d = gdec(g); if (!d || d.done) continue; const m = Number.isInteger(d.master) ? d.master : g.master;
       if (d.action === "delete") g.c.forEach((c, i) => { if (i !== m) ids.push(c.i); });
       if (d.action === "merge") manualMerges.push({ group: g.id, keep: g.c[m], mergeIn: g.c.filter((_, i) => i !== m) });
     }
